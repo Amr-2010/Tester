@@ -1,24 +1,16 @@
 services:
   - type: web
-    name: advertising-broadcast-suite
-    runtime: node
+    name: tester-aspnetcore-sqlite
+    runtime: docker
     plan: free
-    buildCommand: npm install --omit=dev
-    startCommand: npm start
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
     envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: advertising-broadcast-db
-          property: connectionString
       - key: JWT_SECRET
         generateValue: true
       - key: ADMIN_USER
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
-databases:
-  - name: advertising-broadcast-db
-    plan: free
-    databaseName: advertising_broadcast
-    user: advertising_admin
+      - key: SQLITE_PATH
+        value: /app/Data/tester.db
