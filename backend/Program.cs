@@ -56,7 +56,7 @@ app.MapPost("/api/admin/seed-samples",(HttpContext ctx)=>Guard(ctx,"admin",async
   await using var cmd=connection.CreateCommand();cmd.Transaction=(SqliteTransaction)transaction;cmd.CommandText=sql;
   for(var i=0;i<values.Length;i++)cmd.Parameters.AddWithValue("@p"+i,values[i]??DBNull.Value);
   await cmd.ExecuteNonQueryAsync();
-  return connection.LastInsertRowId;
+  cmd.CommandText="SELECT last_insert_rowid()";cmd.Parameters.Clear();return Convert.ToInt64(await cmd.ExecuteScalarAsync());
  }
  try{
   var client=await Insert("INSERT INTO clients(name,contact,email,phone) VALUES(@p0,@p1,@p2,@p3)","DEMO | Nile Retail Egypt","Marketing Department","demo-retail@example.com","01000000000");
@@ -79,7 +79,7 @@ app.MapPost("/api/admin/seed-bulk",(HttpContext ctx)=>Guard(ctx,"admin",async _=
  if(string.IsNullOrWhiteSpace(password)||password.Length<12)return Results.Json(new{error="اضبط DEMO_USERS_PASSWORD بطول 12 حرفًا على الأقل داخل Render قبل إنشاء حسابات التجربة"},statusCode:400);
  if((await Query("SELECT id FROM clients WHERE name=@p0","DEMO | Delta Electronics")).Count>0)return Results.Conflict(new{error="مجموعة DEMO موجودة بالفعل"});
  await using var db=new SqliteConnection(connString);await db.OpenAsync();await using var tx=await db.BeginTransactionAsync();
- async Task<long> Add(string sql,params object?[] args){await using var cmd=db.CreateCommand();cmd.Transaction=(SqliteTransaction)tx;cmd.CommandText=sql;for(int i=0;i<args.Length;i++)cmd.Parameters.AddWithValue("@p"+i,args[i]??DBNull.Value);await cmd.ExecuteNonQueryAsync();return db.LastInsertRowId;}
+ async Task<long> Add(string sql,params object?[] args){await using var cmd=db.CreateCommand();cmd.Transaction=(SqliteTransaction)tx;cmd.CommandText=sql;for(int i=0;i<args.Length;i++)cmd.Parameters.AddWithValue("@p"+i,args[i]??DBNull.Value);await cmd.ExecuteNonQueryAsync();cmd.CommandText="SELECT last_insert_rowid()";cmd.Parameters.Clear();return Convert.ToInt64(await cmd.ExecuteScalarAsync());}
  try{
  var clients=new[]{("Delta Electronics","electronics"),("Nile Foods","foods"),("Cairo Travel","travel")};
  var channels=new[]{("Cairo News","News"),("Nile Entertainment","Entertainment"),("Sports Egypt","Sports")};
