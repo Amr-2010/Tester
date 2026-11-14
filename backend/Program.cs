@@ -108,7 +108,7 @@ app.MapPost("/api/test-runs/{id:long}/ai-analyze",(HttpContext ctx,long id)=>Gua
  var raw=await response.Content.ReadAsStringAsync();
  if(!response.IsSuccessStatusCode)return Results.Json(new{error="فشل طلب تحليل AI",provider_status=(int)response.StatusCode},statusCode:502);
  using var parsed=JsonDocument.Parse(raw);
- var output=parsed.RootElement.TryGetProperty("output",out var arr)?arr.EnumerateArray().SelectMany(x=>x.TryGetProperty("content",out var contents)?contents.EnumerateArray().Where(z=>z.TryGetProperty("text",out _)).Select(z=>z.GetProperty("text").GetString()??""):Enumerable.Empty<string>()).ToArray():Array.Empty<string>();
+ var output=parsed.RootElement.TryGetProperty("output",out var arr)?arr.EnumerateArray().SelectMany(x=>x.TryGetProperty("content",out var contents)?contents.EnumerateArray().Where(z=>z.TryGetProperty("text",out var textProperty)).Select(z=>z.GetProperty("text").GetString()??""):Enumerable.Empty<string>()).ToArray():Array.Empty<string>();
  var analysis=string.Join("\n",output);
  if(string.IsNullOrWhiteSpace(analysis))return Results.Json(new{error="لم يُرجع النموذج نصًا قابلًا للعرض"},statusCode:502);
  await Query("INSERT INTO ai_analyses(run_id,analysis,model,created_by) VALUES(@p0,@p1,@p2,@p3)",id,analysis,payload.model,u["id"]);
