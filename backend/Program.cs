@@ -74,6 +74,36 @@ app.MapPost("/api/admin/seed-samples",(HttpContext ctx)=>Guard(ctx,"admin",async
   return Results.Json(new{error="تعذر إضافة البيانات. تحقق من العلاقات والقيود.",sqlite_code=ex.SqliteErrorCode},statusCode:409);
  }
 }));
+app.MapPost("/api/admin/seed-bulk",(HttpContext ctx)=>Guard(ctx,"admin",async _=>{
+ var password=Environment.GetEnvironmentVariable("DEMO_USERS_PASSWORD");
+ if(string.IsNullOrWhiteSpace(password)||password.Length<12)return Results.Json(new{error="اضبط DEMO_USERS_PASSWORD بطول 12 حرفًا على الأقل داخل Render قبل إنشاء حسابات التجربة"},statusCode:400);
+ if((await Query("SELECT id FROM clients WHERE name=@p0","DEMO | Delta Electronics")).Count>0)return Results.Conflict(new{error="مجموعة DEMO موجودة بالفعل"});
+ await using var db=new SqliteConnection(connString);await db.OpenAsync();await using var tx=await db.BeginTransactionAsync();
+ async Task<long> Add(string sql,params object?[] args){await using var cmd=db.CreateCommand();cmd.Transaction=(SqliteTransaction)tx;cmd.CommandText=sql;for(int i=0;i<args.Length;i++)cmd.Parameters.AddWithValue("@p"+i,args[i]??DBNull.Value);await cmd.ExecuteNonQueryAsync();return db.LastInsertRowId;}
+ try{
+ var clients=new[]{("Delta Electronics","electronics"),("Nile Foods","foods"),("Cairo Travel","travel")};
+ var channels=new[]{("Cairo News","News"),("Nile Entertainment","Entertainment"),("Sports Egypt","Sports")};
+ var ids=new List<long>();var chids=new List<long>();
+ foreach(var (name,segment) in clients)ids.Add(await Add("INSERT INTO clients(name,contact,email,phone) VALUES(@p0,@p1,@p2,@p3)","DEMO | "+name,"Demo "+segment,"demo-"+segment+"@example.com","01000000000"));
+ foreach(var (name,category) in channels)chids.Add(await Add("INSERT INTO channels(name,category,frequency) VALUES(@p0,@p1,@p2)","DEMO | "+name,category,"Simulated"));
+ for(int i=0;i<3;i++){
+  var program=await Add("INSERT INTO programs(channel_id,name,air_time,description) VALUES(@p0,@p1,@p2,@p3)",chids[i],"DEMO | Evening Program "+(i+1),"20:00","Simulated schedule");
+  for(int j=0;j<3;j++){
+   var campaign=await Add("INSERT INTO campaigns(client_id,name,start_date,end_date,budget,status) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",ids[i],"DEMO | Campaign "+(i+1)+"-"+(j+1),"2026-11-15","2026-12-15",50000+(i*3+j)*15000,"demo");
+   var creative=await Add("INSERT INTO creatives(campaign_id,name,duration_seconds,reference_url) VALUES(@p0,@p1,@p2,@p3)",campaign,"DEMO | Creative "+(j+1),15+15*j,"https://example.com/");
+   var spot=await Add("INSERT INTO spots(campaign_id,channel_id,program_id,creative_id,planned_at,price) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",campaign,chids[i],program,creative,"2026-11-"+(20+j)+" 20:30:00",6000+1000*j);
+   if(j!=2)await Add("INSERT INTO airings(spot_id,actual_at,source,notes) VALUES(@p0,@p1,@p2,@p3)",spot,"2026-11-"+(20+j)+" 20:31:00","DEMO simulated","Not real broadcast evidence");
+  }
+  await Add("INSERT INTO test_runs(name,target_type,target_url,notes,status,client_id) VALUES(@p0,@p1,@p2,@p3,'pending',@p4)","DEMO | Website check "+(i+1),"website","https://example.com/","Pending: no automated result yet",ids[i]);
+ }
+ var hash=BCrypt.Net.BCrypt.HashPassword(password);
+ for(int i=0;i<3;i++)await Add("INSERT INTO users(username,password_hash,role,client_id) VALUES(@p0,@p1,'client',@p2)","demo_client_"+(i+1),hash,ids[i]);
+ await Add("INSERT INTO users(username,password_hash,role) VALUES(@p0,@p1,@p2)","demo_operator",hash,"operator");
+ await Add("INSERT INTO users(username,password_hash,role) VALUES(@p0,@p1,@p2)","demo_manager",hash,"manager");
+ await tx.CommitAsync();
+ return Results.Ok(new{message="Created labeled fictional demo dataset",clients=3,channels=3,programs=3,campaigns=9,creatives=9,spots=9,airings=6,test_runs=3,users=5});
+ }catch(Exception){await tx.RollbackAsync();return Results.Json(new{error="تعذر إنشاء مجموعة DEMO؛ لم تُحفظ بيانات جزئية. تحقق من تكرار المستخدمين أو قيود قاعدة البيانات"},statusCode:409);}
+}));
 app.MapPost("/api/test-runs",(HttpContext c,JsonElement b)=>Guard(c,"operator",async u=>{var type=S(b,"target_type");if(!new[]{"website","api","windows_exe","android_apk","advertising_media","broadcast_monitor"}.Contains(type)||S(b,"name").Length==0)return Results.BadRequest();await Query("INSERT INTO test_runs(name,target_type,target_url,notes,created_by,status,client_id) VALUES(@p0,@p1,@p2,@p3,@p4,'pending',@p5)",S(b,"name"),type,S(b,"target_url"),S(b,"notes"),u["id"],L(b,"client_id"));return Results.StatusCode(201);}));
 app.MapGet("/api/test-runs",(HttpContext c)=>Guard(c,"viewer",async _=>Results.Ok(await Query("SELECT t.*,u.username creator FROM test_runs t LEFT JOIN users u ON u.id=t.created_by ORDER BY t.id DESC LIMIT 500"))));
 app.MapPost("/api/test-runs/{id:long}/results",(HttpContext c,long id,JsonElement b)=>Guard(c,"operator",async _=>{if(!new[]{"passed","failed","blocked"}.Contains(S(b,"result")))return Results.BadRequest();await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,@p1,@p2,@p3)",id,S(b,"test_name"),S(b,"result"),S(b,"details"));return Results.StatusCode(201);}));
