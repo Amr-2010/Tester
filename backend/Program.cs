@@ -45,6 +45,35 @@ foreach(var item in tables){var table=item.Key;var columns=item.Value;
  app.MapPut("/api/"+table+"/{id:long}",(HttpContext c,long id,JsonElement b)=>Guard(c,"manager",async _=>{var keys=columns.Where(k=>b.TryGetProperty(k,out var ignoredProperty)).ToArray();if(keys.Length==0)return Results.BadRequest();var values=keys.Select(k=>(object?)(S(b,k)==""?null:S(b,k))).Append(id).ToArray();await Query($"UPDATE {table} SET {string.Join(',',keys.Select((k,i)=>k+"=@p"+i))} WHERE id=@p{keys.Length}",values);return Results.Ok();}));
  app.MapDelete("/api/"+table+"/{id:long}",(HttpContext c,long id)=>Guard(c,"admin",async _=>{await Query($"DELETE FROM {table} WHERE id=@p0",id);return Results.NoContent();}));
 }
+app.MapPost("/api/admin/seed-samples",(HttpContext ctx)=>Guard(ctx,"admin",async _=>{
+ var marker="DEMO | Cairo Retail Campaign";
+ if((await Query("SELECT id FROM campaigns WHERE name=@p0",marker)).Count>0)
+  return Results.Conflict(new{error="البيانات التجريبية موجودة بالفعل. لم يتم تكرارها."});
+ await using var connection=new SqliteConnection(connString);
+ await connection.OpenAsync();
+ await using var transaction=await connection.BeginTransactionAsync();
+ async Task<long> Insert(string sql,params object?[] values){
+  await using var cmd=connection.CreateCommand();cmd.Transaction=(SqliteTransaction)transaction;cmd.CommandText=sql;
+  for(var i=0;i<values.Length;i++)cmd.Parameters.AddWithValue("@p"+i,values[i]??DBNull.Value);
+  await cmd.ExecuteNonQueryAsync();
+  return connection.LastInsertRowId;
+ }
+ try{
+  var client=await Insert("INSERT INTO clients(name,contact,email,phone) VALUES(@p0,@p1,@p2,@p3)","DEMO | Nile Retail Egypt","Marketing Department","demo-retail@example.com","01000000000");
+  var channel=await Insert("INSERT INTO channels(name,category,frequency) VALUES(@p0,@p1,@p2)","DEMO | Cairo TV","Satellite TV","Sample / no actual frequency");
+  var program=await Insert("INSERT INTO programs(channel_id,name,air_time,description) VALUES(@p0,@p1,@p2,@p3)",channel,"DEMO | Evening Show","20:30","برنامج افتراضي لعرض سيناريو الاختبار");
+  var campaign=await Insert("INSERT INTO campaigns(client_id,name,start_date,end_date,budget,status) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",client,marker,"2026-11-15","2026-12-15",250000,"demo");
+  var creative=await Insert("INSERT INTO creatives(campaign_id,name,duration_seconds,reference_url) VALUES(@p0,@p1,@p2,@p3)",campaign,"DEMO | 30-second TV Spot",30,"https://example.com/");
+  var spot=await Insert("INSERT INTO spots(campaign_id,channel_id,program_id,creative_id,planned_at,price) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",campaign,channel,program,creative,"2026-11-20 20:45:00",12500);
+  await Insert("INSERT INTO airings(spot_id,actual_at,source,evidence_url,notes) VALUES(@p0,@p1,@p2,@p3,@p4)",spot,"2026-11-20 20:45:45","DEMO — simulated record",null,"سجل توضيحي افتراضي، ليس دليل بث حقيقي");
+  await Insert("INSERT INTO test_runs(name,target_type,target_url,notes,status,client_id) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)","DEMO | Example.com Website Test","website","https://example.com/","بيانات تجريبية، لم يُجر اختبار حقيقي بعد","pending",client);
+  await transaction.CommitAsync();
+  return Results.Ok(new{message="تم إنشاء بيانات واقعية الشكل لكنها افتراضية وموسومة DEMO",client_id=client,campaign_id=campaign});
+ }catch(Microsoft.Data.Sqlite.SqliteException ex){
+  await transaction.RollbackAsync();
+  return Results.Json(new{error="تعذر إضافة البيانات. تحقق من العلاقات والقيود.",sqlite_code=ex.SqliteErrorCode},statusCode:409);
+ }
+}));
 app.MapPost("/api/test-runs",(HttpContext c,JsonElement b)=>Guard(c,"operator",async u=>{var type=S(b,"target_type");if(!new[]{"website","api","windows_exe","android_apk","advertising_media","broadcast_monitor"}.Contains(type)||S(b,"name").Length==0)return Results.BadRequest();await Query("INSERT INTO test_runs(name,target_type,target_url,notes,created_by,status,client_id) VALUES(@p0,@p1,@p2,@p3,@p4,'pending',@p5)",S(b,"name"),type,S(b,"target_url"),S(b,"notes"),u["id"],L(b,"client_id"));return Results.StatusCode(201);}));
 app.MapGet("/api/test-runs",(HttpContext c)=>Guard(c,"viewer",async _=>Results.Ok(await Query("SELECT t.*,u.username creator FROM test_runs t LEFT JOIN users u ON u.id=t.created_by ORDER BY t.id DESC LIMIT 500"))));
 app.MapPost("/api/test-runs/{id:long}/results",(HttpContext c,long id,JsonElement b)=>Guard(c,"operator",async _=>{if(!new[]{"passed","failed","blocked"}.Contains(S(b,"result")))return Results.BadRequest();await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,@p1,@p2,@p3)",id,S(b,"test_name"),S(b,"result"),S(b,"details"));return Results.StatusCode(201);}));
