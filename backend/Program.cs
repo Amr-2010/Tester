@@ -169,6 +169,66 @@ app.MapPost("/api/test-runs/{id:long}/execute",(Delegate)((HttpContext ctx,long 
   return Results.Ok(new{status="failed",error="Timeout"});
  }
 })));
+// Broadcast HLS playlist validation. Does not assert that a particular advertisement aired.
+app.MapPost("/api/test-runs/{id:long}/broadcast-check",(Delegate)((HttpContext ctx,long id)=>Guard(ctx,"operator",async user=>{
+ var runs=await Query("SELECT * FROM test_runs WHERE id=@p0",id);
+ if(runs.Count==0)return Results.NotFound();
+ if(runs[0]["target_type"]?.ToString()!="broadcast_monitor")return Results.BadRequest(new{error="هذه الجلسة ليست فحص بث"});
+ var target=runs[0]["target_url"]?.ToString()??"";
+ if(!Uri.TryCreate(target,UriKind.Absolute,out var uri)||uri.Scheme!="https"||uri.Port!=443||!string.IsNullOrEmpty(uri.UserInfo))
+  return Results.BadRequest(new{error="مطلوب رابط HLS رسمي HTTPS"});
+ var hosts=(Environment.GetEnvironmentVariable("BROADCAST_ALLOWED_HOSTS")??"").Split(',',StringSplitOptions.RemoveEmptyEntries|StringSplitOptions.TrimEntries);
+ if(!hosts.Any(x=>string.Equals(x,uri.Host,StringComparison.OrdinalIgnoreCase)))return Results.BadRequest(new{error="النطاق غير مصرح به في BROADCAST_ALLOWED_HOSTS"});
+ try{
+  using var handler=new HttpClientHandler{AllowAutoRedirect=false,UseProxy=false};
+  using var http=new HttpClient(handler){Timeout=TimeSpan.FromSeconds(12)};
+  var watch=System.Diagnostics.Stopwatch.StartNew();
+  using var response=await http.GetAsync(uri,HttpCompletionOption.ResponseHeadersRead);
+  var status=(int)response.StatusCode;
+  var contentType=response.Content.Headers.ContentType?.MediaType??"";
+  var length=response.Content.Headers.ContentLength;
+  if(length>1024*1024)return Results.BadRequest(new{error="ملف قائمة البث أكبر من الحد المسموح"});
+  var bytes=await response.Content.ReadAsByteArrayAsync();
+  if(bytes.Length>1024*1024)return Results.BadRequest(new{error="حجم قائمة البث غير صالح"});
+  watch.Stop();
+  var body=Encoding.UTF8.GetString(bytes);
+  var isPlaylist=response.IsSuccessStatusCode&&body.TrimStart('\uFEFF',' ','\n','\r').StartsWith("#EXTM3U",StringComparison.Ordinal);
+  var segments=body.Split('\n').Count(x=>x.TrimStart().StartsWith("#EXTINF:",StringComparison.Ordinal));
+  var variants=body.Split('\n').Count(x=>x.TrimStart().StartsWith("#EXT-X-STREAM-INF:",StringComparison.Ordinal));
+  var evidence=JsonSerializer.Serialize(new{source="live HLS manifest HTTP",checked_at=DateTimeOffset.UtcNow,http_status=status,content_type=contentType,response_ms=watch.ElapsedMilliseconds,playlist_valid=isPlaylist,segment_entries=segments,variant_entries=variants,limitations="Manifest validation only; no playback, frame inspection, or advertisement detection"});
+  await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,@p1,@p2,@p3)",id,"HLS broadcast manifest",isPlaylist?"passed":"failed",evidence);
+  await Query("UPDATE test_runs SET status=@p0 WHERE id=@p1",isPlaylist?"passed":"failed",id);
+  return Results.Ok(new{status=isPlaylist?"passed":"failed",http_status=status,segment_entries=segments,variant_entries=variants,limitations="HLS playlist only; does not prove video playback or ad airing"});
+ }catch(HttpRequestException){return Results.Json(new{error="فشل اتصال بث HLS"},statusCode:502);}
+ catch(TaskCanceledException){return Results.Json(new{error="انتهت مهلة الاتصال بالبث"},statusCode:504);}
+})));
+app.MapPost("/api/test-runs/{id:long}/inspect-file",(Delegate)((HttpContext ctx,long id,IFormFile file)=>Guard(ctx,"operator",async user=>{
+ var runs=await Query("SELECT * FROM test_runs WHERE id=@p0",id);
+ if(runs.Count==0)return Results.NotFound();
+ var kind=runs[0]["target_type"]?.ToString();
+ if(kind!="windows_exe"&&kind!="android_apk")return Results.BadRequest(new{error="جلسة الاختبار ليست EXE أو APK"});
+ var ext=Path.GetExtension(file.FileName).ToLowerInvariant();
+ if(ext!=(kind=="windows_exe"?".exe":".apk"))return Results.BadRequest(new{error="نوع الملف لا يطابق نوع الجلسة"});
+ if(file.Length<4||file.Length>50*1024*1024)return Results.BadRequest(new{error="حجم الملف يجب أن يكون بين 4 بايت و50 ميجابايت"});
+ await using var input=file.OpenReadStream();
+ using var sha=System.Security.Cryptography.SHA256.Create();
+ using var buffer=new MemoryStream();
+ await input.CopyToAsync(buffer);var data=buffer.ToArray();
+ var digest=Convert.ToHexString(sha.ComputeHash(data));
+ bool valid;string details;
+ if(kind=="windows_exe"){
+  valid=data.Length>=64&&data[0]==0x4d&&data[1]==0x5a;
+  if(valid){var offset=BitConverter.ToInt32(data,0x3c);valid=offset>=64&&offset<=data.Length-4&&data[offset]==0x50&&data[offset+1]==0x45&&data[offset+2]==0&&data[offset+3]==0;}
+  details=valid?"PE header detected":"Invalid Windows PE header";
+ }else{
+  valid=data[0]==0x50&&data[1]==0x4b;
+  details=valid?"ZIP/APK header detected":"Invalid APK/ZIP header";
+  if(valid){try{using var archive=new System.IO.Compression.ZipArchive(new MemoryStream(data),System.IO.Compression.ZipArchiveMode.Read);valid=archive.Entries.Any(e=>e.FullName=="AndroidManifest.xml");details=valid?"AndroidManifest.xml found":"AndroidManifest.xml missing";}catch(System.IO.InvalidDataException){valid=false;details="Invalid ZIP archive";}}
+ }
+ var evidence=JsonSerializer.Serialize(new{source="uploaded file static inspection",filename=Path.GetFileName(file.FileName),size_bytes=data.Length,sha256=digest,format_valid=valid,format_details=details,limitations="Static inspection only. The application was not executed."});
+ await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,@p1,@p2,@p3)",id,"Static package inspection",valid?"passed":"failed",evidence);
+ return Results.Ok(new{status=valid?"passed":"failed",sha256=digest,details,limitations="Static file inspection, not executable runtime testing"});
+}))).DisableAntiforgery();
 app.MapPost("/api/test-runs/{id:long}/results",(Delegate)((HttpContext c,long id,JsonElement b)=>Guard(c,"operator",async _=>{if(!new[]{"passed","failed","blocked"}.Contains(S(b,"result")))return Results.BadRequest();await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,@p1,@p2,@p3)",id,S(b,"test_name"),S(b,"result"),S(b,"details"));return Results.StatusCode(201);})));
 app.MapGet("/api/test-runs/{id:long}/report",(Delegate)((HttpContext c,long id)=>Guard(c,"viewer",async _=>{var runs=await Query("SELECT * FROM test_runs WHERE id=@p0",id);if(runs.Count==0)return Results.NotFound();var rows=await Query("SELECT * FROM test_results WHERE run_id=@p0",id);return Results.Ok(new{run=runs[0],results=rows,counts=new{passed=rows.Count(r=>r["result"]?.ToString()=="passed"),failed=rows.Count(r=>r["result"]?.ToString()=="failed"),blocked=rows.Count(r=>r["result"]?.ToString()=="blocked")},ai_generated=false});})));
 app.MapGet("/api/client/profile",(Delegate)((HttpContext c)=>Guard(c,"client",async u=>Results.Ok((await Query("SELECT id,name,contact,email FROM clients WHERE id=@p0",u["client_id"])).FirstOrDefault()))));
