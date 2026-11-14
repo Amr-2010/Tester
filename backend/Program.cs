@@ -75,7 +75,7 @@ foreach(var item in tables){var table=item.Key;var columns=item.Value;
  app.MapPut("/api/"+table+"/{id:long}",(Delegate)((HttpContext c,long id,JsonElement b)=>Guard(c,"manager",async _=>{var keys=columns.Where(k=>b.TryGetProperty(k,out var ignoredProperty)).ToArray();if(keys.Length==0)return Results.BadRequest();var values=keys.Select(k=>(object?)(S(b,k)==""?null:S(b,k))).Append(id).ToArray();await Query($"UPDATE {table} SET {string.Join(',',keys.Select((k,i)=>k+"=@p"+i))} WHERE id=@p{keys.Length}",values);return Results.Ok();})));
  app.MapDelete("/api/"+table+"/{id:long}",(Delegate)((HttpContext c,long id)=>Guard(c,"admin",async _=>{await Query($"DELETE FROM {table} WHERE id=@p0",id);return Results.NoContent();})));
 }
-app.MapPost("/api/admin/seed-samples",(HttpContext ctx)=>Guard(ctx,"admin",async _=>{
+app.MapPost("/api/admin/seed-samples",(Delegate)((HttpContext ctx)=>Guard(ctx,"admin",async _=>{
  var marker="DEMO | Cairo Retail Campaign";
  if((await Query("SELECT id FROM campaigns WHERE name=@p0",marker)).Count>0)
   return Results.Conflict(new{error="البيانات التجريبية موجودة بالفعل. لم يتم تكرارها."});
@@ -103,8 +103,8 @@ app.MapPost("/api/admin/seed-samples",(HttpContext ctx)=>Guard(ctx,"admin",async
   await transaction.RollbackAsync();
   return Results.Json(new{error="تعذر إضافة البيانات. تحقق من العلاقات والقيود.",sqlite_code=ex.SqliteErrorCode},statusCode:409);
  }
-}));
-app.MapPost("/api/admin/seed-bulk",(HttpContext ctx)=>Guard(ctx,"admin",async _=>{
+})));
+app.MapPost("/api/admin/seed-bulk",(Delegate)((HttpContext ctx)=>Guard(ctx,"admin",async _=>{
  var password=Environment.GetEnvironmentVariable("DEMO_USERS_PASSWORD");
  if(string.IsNullOrWhiteSpace(password)||password.Length<12)return Results.Json(new{error="اضبط DEMO_USERS_PASSWORD بطول 12 حرفًا على الأقل داخل Render قبل إنشاء حسابات التجربة"},statusCode:400);
  if((await Query("SELECT id FROM clients WHERE name=@p0","DEMO | Delta Electronics")).Count>0)return Results.Conflict(new{error="مجموعة DEMO موجودة بالفعل"});
@@ -133,7 +133,7 @@ app.MapPost("/api/admin/seed-bulk",(HttpContext ctx)=>Guard(ctx,"admin",async _=
  await tx.CommitAsync();
  return Results.Ok(new{message="Created labeled fictional demo dataset",clients=3,channels=3,programs=3,campaigns=9,creatives=9,spots=9,airings=6,test_runs=3,users=5});
  }catch(Exception){await tx.RollbackAsync();return Results.Json(new{error="تعذر إنشاء مجموعة DEMO؛ لم تُحفظ بيانات جزئية. تحقق من تكرار المستخدمين أو قيود قاعدة البيانات"},statusCode:409);}
-}));
+})));
 app.MapPost("/api/test-runs",(Delegate)((HttpContext c,JsonElement b)=>Guard(c,"operator",async u=>{var type=S(b,"target_type");if(!new[]{"website","api","windows_exe","android_apk","advertising_media","broadcast_monitor"}.Contains(type)||S(b,"name").Length==0)return Results.BadRequest();await Query("INSERT INTO test_runs(name,target_type,target_url,notes,created_by,status,client_id) VALUES(@p0,@p1,@p2,@p3,@p4,'pending',@p5)",S(b,"name"),type,S(b,"target_url"),S(b,"notes"),u["id"],L(b,"client_id"));return Results.StatusCode(201);})));
 app.MapGet("/api/test-runs",(Delegate)((HttpContext c)=>Guard(c,"viewer",async _=>Results.Ok(await Query("SELECT t.*,u.username creator FROM test_runs t LEFT JOIN users u ON u.id=t.created_by ORDER BY t.id DESC LIMIT 500")))));
 app.MapPost("/api/test-runs/{id:long}/results",(Delegate)((HttpContext c,long id,JsonElement b)=>Guard(c,"operator",async _=>{if(!new[]{"passed","failed","blocked"}.Contains(S(b,"result")))return Results.BadRequest();await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,@p1,@p2,@p3)",id,S(b,"test_name"),S(b,"result"),S(b,"details"));return Results.StatusCode(201);})));
