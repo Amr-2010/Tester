@@ -136,6 +136,39 @@ app.MapPost("/api/admin/seed-bulk",(Delegate)((HttpContext ctx)=>Guard(ctx,"admi
 })));
 app.MapPost("/api/test-runs",(Delegate)((HttpContext c,JsonElement b)=>Guard(c,"operator",async u=>{var type=S(b,"target_type");if(!new[]{"website","api","windows_exe","android_apk","advertising_media","broadcast_monitor"}.Contains(type)||S(b,"name").Length==0)return Results.BadRequest();await Query("INSERT INTO test_runs(name,target_type,target_url,notes,created_by,status,client_id) VALUES(@p0,@p1,@p2,@p3,@p4,'pending',@p5)",S(b,"name"),type,S(b,"target_url"),S(b,"notes"),u["id"],L(b,"client_id"));return Results.StatusCode(201);})));
 app.MapGet("/api/test-runs",(Delegate)((HttpContext c)=>Guard(c,"viewer",async _=>Results.Ok(await Query("SELECT t.*,u.username creator FROM test_runs t LEFT JOIN users u ON u.id=t.created_by ORDER BY t.id DESC LIMIT 500")))));
+app.MapPost("/api/test-runs/{id:long}/execute",(Delegate)((HttpContext ctx,long id)=>Guard(ctx,"operator",async user=>{
+ var rows=await Query("SELECT * FROM test_runs WHERE id=@p0",id);
+ if(rows.Count==0)return Results.NotFound();
+ var run=rows[0];var kind=run["target_type"]?.ToString();
+ if(kind!="website"&&kind!="api")return Results.BadRequest(new{error="الفحص المباشر متاح حاليًا للمواقع وواجهات API فقط. ملفات APK وEXE والبث تتطلب عامل اختبار منفصل."});
+ var target=run["target_url"]?.ToString()??"";
+ if(!Uri.TryCreate(target,UriKind.Absolute,out var uri)||uri.Scheme!=Uri.UriSchemeHttps||uri.Port!=443||!string.IsNullOrEmpty(uri.UserInfo))
+  return Results.BadRequest(new{error="يجب استخدام HTTPS على المنفذ 443"});
+ var allowed=(Environment.GetEnvironmentVariable("TEST_ALLOWED_HOSTS")??"example.com").Split(',',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);
+ if(!allowed.Any(host=>string.Equals(host,uri.Host,StringComparison.OrdinalIgnoreCase)))return Results.BadRequest(new{error="الموقع غير مصرح بفحصه. أضف النطاق إلى TEST_ALLOWED_HOSTS بعد التحقق من ملكيته."});
+ await Query("UPDATE test_runs SET status='running' WHERE id=@p0",id);
+ try{
+  using var handler=new HttpClientHandler{AllowAutoRedirect=false,UseProxy=false};
+  using var http=new HttpClient(handler){Timeout=TimeSpan.FromSeconds(15)};
+  http.DefaultRequestHeaders.UserAgent.ParseAdd("AlBayanQA/1.0");
+  var timer=System.Diagnostics.Stopwatch.StartNew();
+  using var response=await http.GetAsync(uri,HttpCompletionOption.ResponseHeadersRead);
+  timer.Stop();
+  var code=(int)response.StatusCode;var pass=code>=200&&code<400;
+  var evidence=JsonSerializer.Serialize(new{checked_at=DateTimeOffset.UtcNow,http_status=code,response_ms=timer.ElapsedMilliseconds,url=uri.GetLeftPart(UriPartial.Path),redirect_location=response.Headers.Location?.ToString(),source="live HTTP request",ai_generated=false});
+  await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,@p1,@p2,@p3)",id,"Live HTTPS availability",pass?"passed":"failed",evidence);
+  await Query("UPDATE test_runs SET status=@p0 WHERE id=@p1",pass?"passed":"failed",id);
+  return Results.Ok(new{status=pass?"passed":"failed",http_status=code,response_ms=timer.ElapsedMilliseconds,source="live HTTP request"});
+ }catch(HttpRequestException){
+  await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,'HTTPS connection','failed',@p1)",id,"Connection failed");
+  await Query("UPDATE test_runs SET status='failed' WHERE id=@p0",id);
+  return Results.Ok(new{status="failed",error="Connection failed"});
+ }catch(TaskCanceledException){
+  await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,'HTTPS timeout','failed',@p1)",id,"Request timed out after 15 seconds");
+  await Query("UPDATE test_runs SET status='failed' WHERE id=@p0",id);
+  return Results.Ok(new{status="failed",error="Timeout"});
+ }
+})));
 app.MapPost("/api/test-runs/{id:long}/results",(Delegate)((HttpContext c,long id,JsonElement b)=>Guard(c,"operator",async _=>{if(!new[]{"passed","failed","blocked"}.Contains(S(b,"result")))return Results.BadRequest();await Query("INSERT INTO test_results(run_id,test_name,result,details) VALUES(@p0,@p1,@p2,@p3)",id,S(b,"test_name"),S(b,"result"),S(b,"details"));return Results.StatusCode(201);})));
 app.MapGet("/api/test-runs/{id:long}/report",(Delegate)((HttpContext c,long id)=>Guard(c,"viewer",async _=>{var runs=await Query("SELECT * FROM test_runs WHERE id=@p0",id);if(runs.Count==0)return Results.NotFound();var rows=await Query("SELECT * FROM test_results WHERE run_id=@p0",id);return Results.Ok(new{run=runs[0],results=rows,counts=new{passed=rows.Count(r=>r["result"]?.ToString()=="passed"),failed=rows.Count(r=>r["result"]?.ToString()=="failed"),blocked=rows.Count(r=>r["result"]?.ToString()=="blocked")},ai_generated=false});})));
 app.MapGet("/api/client/profile",(Delegate)((HttpContext c)=>Guard(c,"client",async u=>Results.Ok((await Query("SELECT id,name,contact,email FROM clients WHERE id=@p0",u["client_id"])).FirstOrDefault()))));
