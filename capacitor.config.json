@@ -1,0 +1,10 @@
+{
+  "appId": "com.albayan.testingcenter",
+  "appName": "AlBayan Testing Center",
+  "webDir": "public",
+  "server": {
+    "url": "https://YOUR-SERVICE.onrender.com",
+    "cleartext": false,
+    "androidScheme": "https"
+  }
+}
