@@ -6,3 +6,5 @@ function settings(){document.getElementById('content').innerHTML='<div class="ca
 
 async function seedDemo(){if(!confirm('إنشاء بيانات DEMO واضحة المصدر؟'))return;try{const r=await request('admin/demo-seed',{method:'POST'});alert(r.message);dashboard()}catch(e){alert(e.message)}}
 async function executeTest(id){if(!confirm('تشغيل اختبار HTTP فعلي على الهدف المصرح به؟'))return;try{const r=await request('test-runs/'+id+'/execute',{method:'POST'});alert('نتيجة HTTP: '+r.status+' — '+(r.http_status||'network error'));testReport(id)}catch(e){alert(e.message)}}
+
+async function analyzeRun(id){if(!confirm('إرسال نتائج الاختبار إلى مزود AI لتحليلها؟ تأكد من عدم وجود بيانات سرية.'))return;try{const r=await request('test-runs/'+id+'/ai-analyze',{method:'POST'});document.getElementById('content').innerHTML='<div class="card"><h2>تحليل AI — '+id+'</h2><p>النموذج: '+esc(r.model)+'</p><pre style="white-space:pre-wrap;direction:rtl;font:inherit;line-height:1.8">'+esc(r.analysis)+'</pre><button onclick="testReport('+id+')">العودة للتقرير</button></div>'}catch(e){alert('تعذر التحليل: '+e.message)}}
